@@ -1,0 +1,25 @@
+# Ignore data directory
+/data/
+
+# Ignore checkpoint directories
+/checkpoints/
+/checkpoints_extended/
+
+# Ignore operating system files
+.DS_Store
+Thumbs.db
+
+# Ignore IDE files
+.vscode/
+.idea/
+
+# Ignore Python bytecode files
+*.pyc
+__pycache__/
+
+# Ignore environment files
+environment.yml
+
+# Ignore virtual environment directories
+venv/
+env/
