@@ -2,41 +2,47 @@ import os
 import pickle
 from datasets import load_dataset
 from tqdm import tqdm
-from utils.vocabulary import Vocabulary
+from transformers import AutoTokenizer
+import h5py
 
-def tokenize(text):
-    # Simple whitespace tokenizer; replace with more sophisticated processing if needed
-    return text.split()
+# Choose a pre-trained tokenizer (e.g., GPT-2)
+tokenizer_name = "gpt2"
+tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 
-# Load the dataset and take a tenth of the training data
+# Define maximum sequence length
+MAX_LENGTH = 1024  # Adjust based on your model's requirements
+
+# Load the dataset and take a subset for faster processing (e.g., 10%)
 dataset = load_dataset("Skylion007/openwebtext")
 dataset_size = len(dataset['train'])
-tenth_dataset = dataset['train'].select(range(dataset_size // 10))  # Select the first 10% of the dataset
+subset_size = dataset_size // 10  # Using only 10% for speedup
+subset = dataset['train'].select(range(subset_size))
 
-# Load or build the vocabulary
-vocab_file = './data/vocab.pkl'
-if os.path.exists(vocab_file):
-    print("Loading vocabulary...")
-    vocab = Vocabulary.load_vocab(vocab_file)
-else:
-    print("Building vocabulary...")
-    vocab = Vocabulary()
-    for entry in tqdm(tenth_dataset, desc="Building Vocabulary"):
-        tokens = tokenize(entry['text'])
-        for token in tokens:
-            vocab.add_token(token)
-    vocab.save_vocab(vocab_file)
-    print(f"Vocabulary built and saved to {vocab_file}")
+# Path to save the HDF5 file
+hdf5_path = './data/preprocessed_data.h5'
 
-# Process and save the tokenized data
-preprocessed_data_path = './data/preprocessed_data.pkl'
-tokenized_data = []
-print("Processing text data...")
-for entry in tqdm(tenth_dataset, desc="Processing Data"):
-    tokens = tokenize(entry['text'])
-    numericalized_tokens = [vocab.lookup_index(token) for token in tokens]
-    tokenized_data.extend(numericalized_tokens)
+# Create the HDF5 file
+with h5py.File(hdf5_path, 'w') as hdf5_file:
+    # Initialize a dataset within the HDF5 file
+    # Assuming token IDs are stored as 32-bit integers
+    dset = hdf5_file.create_dataset(
+        'tokens',
+        shape=(0,),
+        maxshape=(None,),
+        dtype='int32',
+        chunks=True  # Enable chunking for efficient resizing
+    )
 
-with open(preprocessed_data_path, 'wb') as f:
-    pickle.dump(tokenized_data, f)
-print(f"Data processed and saved to {preprocessed_data_path}")
+    print("Tokenizing and encoding the dataset...")
+    for entry in tqdm(subset, desc="Tokenizing Data"):
+        # Tokenize and encode the text
+        tokens = tokenizer.encode(entry['text'], truncation=True, max_length=MAX_LENGTH)
+        tokens = tokens[:MAX_LENGTH]  # Ensure tokens do not exceed MAX_LENGTH
+
+        # Append tokens to the HDF5 dataset
+        current_size = dset.shape[0]
+        new_size = current_size + len(tokens)
+        dset.resize((new_size,))
+        dset[current_size:new_size] = tokens
+
+print(f"Tokenized data saved to {hdf5_path}")

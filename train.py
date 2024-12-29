@@ -6,9 +6,9 @@ import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from models.model import LanguageModel
-from utils.data_loader import get_data_loader
-from utils.vocabulary import Vocabulary
-import pickle
+from utils.hdf5_dataset import HDF5Dataset  # Import the custom Dataset
+from transformers import AutoTokenizer
+import h5py
 import os
 
 # --------------------------
@@ -23,8 +23,7 @@ DROPOUT = 0.2
 LEARNING_RATE = 0.001
 NUM_EPOCHS = 15
 CHECKPOINT_DIR = "./checkpoints"
-VOCAB_PATH = "./data/vocab.pkl"  # Path to load the vocabulary
-PREPROCESSED_DATA_PATH = "./data/preprocessed_data.pkl"  # Path to load the numericalized data
+PREPROCESSED_DATA_PATH = "./data/preprocessed_data.h5"  # Updated path to HDF5 file
 
 # Updated Attention Parameters
 NUM_HEADS = 16  # Must divide HIDDEN_DIM evenly
@@ -41,34 +40,34 @@ HEAD_DIVISION = {
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
 # --------------------------
-# 3. Load Vocabulary
+# 3. Initialize Tokenizer
 # --------------------------
-print("Loading the vocabulary...")
-vocab = Vocabulary.load_vocab(VOCAB_PATH)
-print(f"Vocabulary loaded. Size: {len(vocab.token_to_idx)}")
+print("Initializing the tokenizer...")
+tokenizer = AutoTokenizer.from_pretrained("gpt2")
+VOCAB_SIZE = tokenizer.vocab_size
+print(f"Tokenizer initialized. Vocabulary size: {VOCAB_SIZE}")
 
 # --------------------------
-# 4. Load Numericalized Data
+# 4. Initialize Dataset and DataLoader
 # --------------------------
-print("Loading numericalized data...")
-with open(PREPROCESSED_DATA_PATH, "rb") as f:
-    tokenized_data = pickle.load(f)  # This is a list of token indices
-print(f"Numericalized data loaded. Total tokens: {len(tokenized_data)}")
-
-# --------------------------
-# 5. Initialize DataLoader
-# --------------------------
-print("Initializing DataLoader...")
-loader = get_data_loader(tokenized_data, SEQUENCE_LENGTH, BATCH_SIZE)
+print("Initializing Dataset and DataLoader...")
+dataset = HDF5Dataset(PREPROCESSED_DATA_PATH, SEQUENCE_LENGTH)
+loader = torch.utils.data.DataLoader(
+    dataset,
+    batch_size=BATCH_SIZE,
+    shuffle=True,  # Shuffle for training
+    num_workers=6,  # Adjust based on your CPU
+    pin_memory=True if torch.cuda.is_available() else False
+)
 print(f"Loaded dataset size: {len(loader.dataset)} sequences")
-print(f"Vocabulary size: {len(vocab.token_to_idx)}")
+print(f"Vocabulary size: {VOCAB_SIZE}")
 
 # --------------------------
-# 6. Initialize the Model
+# 5. Initialize the Model
 # --------------------------
 print("Initializing the model...")
 model = LanguageModel(
-    vocab_size=len(vocab.token_to_idx),
+    vocab_size=VOCAB_SIZE,
     embedding_dim=EMBEDDING_DIM,
     hidden_dim=HIDDEN_DIM,
     num_layers=NUM_LAYERS,
@@ -79,51 +78,34 @@ model = LanguageModel(
 print("Model initialized.")
 
 # --------------------------
-# 7. Define Device
+# 6. Define Device
 # --------------------------
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model.to(device)
 print(f"Using device: {device}")
 
 # --------------------------
-# 8. Define Optimizer and Loss Function
+# 7. Define Optimizer and Loss Function
 # --------------------------
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
 # --------------------------
-# 9. Initialize TensorBoard Writer
+# 8. Initialize TensorBoard Writer
 # --------------------------
 writer = SummaryWriter(log_dir="./runs/language_model")
 
-# --------------------------
-# 10. Log Embeddings for Visualization
-# --------------------------
-# Log embeddings at the start (epoch=0) and after each epoch
-def log_embeddings(model, writer, vocab, epoch):
-    # Select a subset of embeddings to visualize (e.g., first 1000 tokens)
-    num_embeddings = min(1000, len(vocab.token_to_idx))
-    embeddings = model.embedding.weight[:num_embeddings].detach().cpu()
-    metadata = [vocab.lookup_token(i) for i in range(num_embeddings)]
-    
-    writer.add_embedding(
-        embeddings,
-        metadata=metadata,
-        label_img=None,
-        global_step=epoch,
-        tag='word_embeddings'
-    )
-
-# Log the initial embeddings before training
-log_embeddings(model, writer, vocab, epoch=0)
 
 # --------------------------
-# 11. Training Loop
+# 10. Training Loop
 # --------------------------
 print("Starting training...")
 for epoch in range(1, NUM_EPOCHS + 1):
     print(f"\nEpoch {epoch}/{NUM_EPOCHS}")
     epoch_loss = 0
+
+    # Set model to training mode
+    model.train()
 
     # Create progress bar
     progress_bar = tqdm(loader, desc="Training Progress", leave=False)
@@ -133,7 +115,7 @@ for epoch in range(1, NUM_EPOCHS + 1):
         inputs, targets = inputs.to(device), targets.to(device)
 
         # Validate inputs
-        if inputs.max() >= len(vocab.token_to_idx) or inputs.min() < 0:
+        if inputs.max() >= VOCAB_SIZE or inputs.min() < 0:
             raise ValueError(f"Invalid token indices in inputs: {inputs}")
 
         # Zero the gradients
@@ -159,7 +141,8 @@ for epoch in range(1, NUM_EPOCHS + 1):
         # Log gradients and weights histograms periodically (e.g., every 100 batches)
         if batch_idx % 100 == 0:
             for name, param in model.named_parameters():
-                writer.add_histogram(f"Gradients/{name}", param.grad, global_step)
+                if param.grad is not None:
+                    writer.add_histogram(f"Gradients/{name}", param.grad, global_step)
                 writer.add_histogram(f"Weights/{name}", param.data, global_step)
 
         # Update progress bar
@@ -182,13 +165,13 @@ for epoch in range(1, NUM_EPOCHS + 1):
     print(f"Model checkpoint saved at {checkpoint_path}")
 
     # Log embeddings after each epoch
-    log_embeddings(model, writer, vocab, epoch)
+    log_embeddings(model, writer, tokenizer, epoch)
 
 # Close the TensorBoard writer
 writer.close()
 
 # --------------------------
-# 12. Sanity Check After Training
+# 11. Sanity Check After Training
 # --------------------------
 print("\nTraining complete. Running a sanity check on the model...")
 
@@ -202,11 +185,11 @@ def generate_next_token(model, input_seq, device):
         return predicted_idx
 
 # Example input sequence (first SEQUENCE_LENGTH tokens from the dataset)
-example_sequence = numericalized_data[:SEQUENCE_LENGTH]
+example_sequence = dataset.tokens[:SEQUENCE_LENGTH]
 print(f"Input Sequence (token indices): {example_sequence}")
 predicted_token = generate_next_token(model, example_sequence, device)
 print(f"Predicted Next Token Index: {predicted_token}")
 
 # Optional: Convert predicted token index back to token
-predicted_word = vocab.lookup_token(predicted_token)
+predicted_word = tokenizer.convert_ids_to_tokens(predicted_token)
 print(f"Predicted Next Token: {predicted_word}")
