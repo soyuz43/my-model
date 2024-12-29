@@ -17,8 +17,6 @@ Thumbs.db
 *.pyc
 __pycache__/
 
-# Ignore environment files
-environment.yml
 
 # Ignore virtual environment directories
 venv/
